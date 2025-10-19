@@ -515,7 +515,7 @@ class Diagram:
             elif self.duplicate_policy is not None:
                 effective_policy_spec = self.duplicate_policy
             else:
-                effective_policy_spec = None
+                effective_policy_spec = get_default_duplicate_policy()
             token = _diagram_ctx.set(self)
             try:
                 for lbl in labels:
@@ -684,7 +684,7 @@ class Node:
         elif self._diagram.duplicate_policy is not None:
             effective_policy_spec = self._diagram.duplicate_policy
         else:
-            effective_policy_spec = None
+            effective_policy_spec = get_default_duplicate_policy()
         # Retain what policy was used on this node for potential redo operations.
         self._duplicate_policy_spec = effective_policy_spec
         self._original_id = orig_id
