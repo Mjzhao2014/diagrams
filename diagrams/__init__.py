@@ -2,9 +2,105 @@ import contextvars
 import os
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+import threading
+import warnings
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from graphviz import Digraph
+
+# Global duplicate policy default (string or callable). Defaults to "error" when None.
+_global_duplicate_policy: Union[str, Callable] = "error"
+
+
+def set_default_duplicate_policy(policy: Union[str, Callable, None]) -> None:
+    """Set the global duplicate policy used when no per-diagram or per-call policy is provided."""
+    global _global_duplicate_policy
+    if policy is None:
+        _global_duplicate_policy = "error"
+    else:
+        _global_duplicate_policy = policy
+
+
+def get_default_duplicate_policy() -> Union[str, Callable]:
+    """Retrieve the current global default duplicate policy."""
+    return _global_duplicate_policy
+
+
+def _normalize_key(value: str) -> str:
+    """Normalize a label/id by stripping whitespace and lowering case for dedup comparison."""
+    return "".join(value.split()).lower()
+
+
+def _error_policy(label: str, nodeid: str, existing_labels: List[str], existing_ids: List[str]) -> Tuple[str, str]:
+    """Built-in duplicate policy: raise ValueError on duplicate label or id."""
+    normalized_label = _normalize_key(label)
+    normalized_id = _normalize_key(nodeid)
+    conflicts: List[str] = []
+    if normalized_label in existing_labels:
+        conflicts.append(f"label '{label}'")
+    if normalized_id in existing_ids:
+        conflicts.append(f"id '{nodeid}'")
+    if conflicts:
+        diagram = getdiagram()
+        dname = diagram.name if diagram else "<unknown>"
+        raise ValueError(f"Diagram '{dname}': duplicate {', '.join(conflicts)} under 'error' policy")
+    return label, nodeid
+
+
+def _warn_policy(label: str, nodeid: str, existing_labels: List[str], existing_ids: List[str]) -> Tuple[str, str]:
+    """Built-in duplicate policy: emit warning but keep both."""
+    normalized_label = _normalize_key(label)
+    normalized_id = _normalize_key(nodeid)
+    conflicts: List[str] = []
+    if normalized_label in existing_labels:
+        conflicts.append(f"label '{label}'")
+    if normalized_id in existing_ids:
+        conflicts.append(f"id '{nodeid}'")
+    if conflicts:
+        diagram = getdiagram()
+        dname = diagram.name if diagram else "<unknown>"
+        warnings.warn(
+            f"Diagram '{dname}': duplicate {', '.join(conflicts)} under 'warn' policy",
+            stacklevel=2,
+        )
+    return label, nodeid
+
+
+def _copy_policy(label: str, nodeid: str, existing_labels: List[str], existing_ids: List[str]) -> Tuple[str, str]:
+    """Built-in duplicate policy: generate unique label and/or id by appending a numeric suffix."""
+    new_label = label
+    base_label = label
+    idx = 1
+    while _normalize_key(new_label) in existing_labels:
+        new_label = f"{base_label}_{idx}"
+        idx += 1
+    new_id = nodeid
+    base_id = nodeid
+    id_idx = 1
+    while _normalize_key(new_id) in existing_ids:
+        new_id = f"{base_id}_{id_idx}"
+        id_idx += 1
+    return new_label, new_id
+
+
+def _resolve_policy(policy: Union[str, Callable, None]) -> Callable[[str, str, List[str], List[str]], Tuple[str, str]]:
+    """Map a policy specification to a callable implementation."""
+    effective = policy
+    if effective is None:
+        effective = get_default_duplicate_policy()
+    if isinstance(effective, str):
+        if effective == "error":
+            return _error_policy
+        elif effective == "warn":
+            return _warn_policy
+        elif effective == "copy":
+            return _copy_policy
+        else:
+            raise ValueError(f"Unknown duplicate policy '{effective}'")
+    elif callable(effective):
+        return effective  # type: ignore
+    else:
+        raise ValueError(f"Invalid duplicate policy '{effective}'")
 
 # Global contexts for a diagrams and a cluster.
 #
@@ -89,6 +185,7 @@ class Diagram:
         graph_attr: Optional[dict] = None,
         node_attr: Optional[dict] = None,
         edge_attr: Optional[dict] = None,
+        duplicate_policy: Union[str, Callable, None] = None,
     ):
         """Diagram represents a global diagrams context.
 
@@ -104,6 +201,7 @@ class Diagram:
         :param node_attr: Provide node_attr dot config attributes.
         :param edge_attr: Provide edge_attr dot config attributes.
         :param strict: Rendering should merge multi-edges.
+        :param duplicate_policy: Deduplication policy for node labels/ids within this diagram.
         """
         if graph_attr is None:
             graph_attr = {}
@@ -154,6 +252,19 @@ class Diagram:
         self.show = show
         self.autolabel = autolabel
 
+        # deduplication related structures
+        # Per-diagram duplicate policy
+        self.duplicate_policy: Union[str, Callable, None] = duplicate_policy
+        # Nodes created in this diagram
+        self._nodes: List[Node] = []
+        # record of deduplication events
+        self._dedup_events: List[Dict] = []
+        # undo/redo stacks for node operations
+        self._undo_stack: List[Tuple[str, List[Node]]] = []
+        self._redo_stack: List[Tuple[str, List[Node]]] = []
+        # lock used for thread-safe batch creation of nodes
+        self._lock = threading.Lock()
+
     def __str__(self) -> str:
         return str(self.dot)
 
@@ -197,6 +308,125 @@ class Diagram:
                 self.dot.render(format=one_format, view=self.show, quiet=True)
         else:
             self.dot.render(format=self.outformat, view=self.show, quiet=True)
+
+    def undo(self) -> None:
+        """Undo the most recent node addition."""
+        if not self._undo_stack:
+            return
+        op_type, nodes = self._undo_stack.pop()
+        if op_type == "add":
+            # Remove these nodes from our internal list
+            for n in nodes:
+                if n in self._nodes:
+                    self._nodes.remove(n)
+            # push onto redo stack
+            self._redo_stack.append((op_type, nodes))
+            # rebuild graphviz dot to reflect removal
+            self._rebuild()
+
+    def redo(self) -> None:
+        """Redo the most recently undone node addition."""
+        if not self._redo_stack:
+            return
+        op_type, nodes = self._redo_stack.pop()
+        if op_type == "add":
+            recreated: List[Node] = []
+            # Recreate nodes in batch to preserve atomicity and policy.
+            for n in nodes:
+                recreated.append(
+                    Node(
+                        n._raw_label,
+                        duplicate_policy=n._duplicate_policy_spec,  # type: ignore
+                        batch=True,
+                    )
+                )
+            self._undo_stack.append((op_type, recreated))
+
+    def _rebuild(self) -> None:
+        """Rebuild the underlying graphviz structures from current nodes."""
+        # reset the top-level graph
+        saved_graph_attr = dict(self.dot.graph_attr)
+        saved_node_attr = dict(self.dot.node_attr)
+        saved_edge_attr = dict(self.dot.edge_attr)
+        self.dot = Digraph(self.name, filename=self.filename, strict=False)
+        self.dot.graph_attr.update(saved_graph_attr)
+        self.dot.node_attr.update(saved_node_attr)
+        self.dot.edge_attr.update(saved_edge_attr)
+        # gather clusters present
+        clusters = {n._cluster for n in self._nodes if n._cluster}
+        # reset clusters
+        for cluster in clusters:
+            c_graph_attr = dict(cluster.dot.graph_attr)
+            c_node_attr = dict(cluster.dot.node_attr)
+            c_edge_attr = dict(cluster.dot.edge_attr)
+            cluster.dot = Digraph(cluster.name)
+            cluster.dot.graph_attr.update(c_graph_attr)
+            cluster.dot.node_attr.update(c_node_attr)
+            cluster.dot.edge_attr.update(c_edge_attr)
+        # re-add nodes to graphviz structures
+        for node in self._nodes:
+            if node._cluster:
+                node._cluster.node(node.nodeid, node.label, **node._attrs)
+            else:
+                self.node(node.nodeid, node.label, **node._attrs)
+        # embed clusters into diagram dot respecting nesting
+        for cluster in clusters:
+            if cluster._parent:
+                cluster._parent.subgraph(cluster.dot)
+            else:
+                self.subgraph(cluster.dot)
+
+    def dedup_report(self) -> Union[List[Dict], Dict]:
+        """Return a list/dict summarizing deduplication events."""
+        return self._dedup_events
+
+    def add_nodes(self, labels: List[str], duplicate_policy: Union[str, Callable, None] = None) -> List['Node']:
+        """Atomically create multiple nodes from a list of labels. If any node violates
+        the deduplication policy, the batch creation fails and no nodes are added.
+        When invoked via this method, node addition is thread-safe and will respect
+        the provided per-call duplicate_policy, falling back to the Diagram-level or
+        global policy as needed."""
+        if not isinstance(labels, list):
+            raise ValueError("labels must be a list of strings")
+        for lbl in labels:
+            if not isinstance(lbl, str):
+                raise ValueError("Node labels must be strings")
+        nodes: List[Node] = []
+        with self._lock:
+            # Precompute deduplicated labels/ids to ensure atomicity.
+            existing_labels = [_normalize_key(n.label) for n in self._nodes]
+            existing_ids = [_normalize_key(n.nodeid) for n in self._nodes]
+            effective_policy_spec: Union[str, Callable, None]
+            if duplicate_policy is not None:
+                effective_policy_spec = duplicate_policy
+            else:
+                effective_policy_spec = self.duplicate_policy
+            policy_func = _resolve_policy(effective_policy_spec)
+            proposed: List[Tuple[str, str]] = []
+            # generate ids and labels upfront
+            for lbl in labels:
+                node_id = Node._rand_id()
+                # apply policy to check duplicates
+                new_label, new_id = policy_func(lbl, node_id, existing_labels.copy(), existing_ids.copy())
+                # update existing sets to include this new node for subsequent iterations
+                existing_labels.append(_normalize_key(new_label))
+                existing_ids.append(_normalize_key(new_id))
+                proposed.append((new_label, new_id))
+            # All dedup passed. Create nodes.
+            try:
+                for (lbl, nid) in proposed:
+                    # Pass the resolved policy and mark as batch creation to avoid per-node undo.
+                    node = Node(lbl, nodeid=nid, duplicate_policy=policy_func, batch=True)  # type: ignore
+                    nodes.append(node)
+                # Bundle the batch into undo stack as one operation.
+                self._undo_stack.append(("add", nodes))
+                return nodes
+            except Exception:
+                # In case of any error during actual creation, detach nodes that may have been created.
+                for n in nodes:
+                    if n in self._nodes:
+                        self._nodes.remove(n)
+                raise
 
 
 class Cluster:
@@ -293,20 +523,70 @@ class Node:
 
     _height = 1.9
 
-    def __init__(self, label: str = "", *, nodeid: str = None, **attrs: Dict):
+    def __init__(
+        self,
+        label: str = "",
+        *,
+        nodeid: str = None,
+        duplicate_policy: Union[str, Callable, None] = None,
+        batch: bool = False,
+        **attrs: Dict,
+    ):
         """Node represents a system component.
 
         :param label: Node label.
+        :param duplicate_policy: Optional duplicate policy override for this node creation.
+            Can be "error", "warn", or "copy" to use built-in policies, a callable conforming
+            to `(label, nodeid, existing_labels, existing_ids) -> (label, nodeid)`, or None to
+            defer to the Diagram- or global-level policy.
+        :param batch: Internal flag used to suppress undo stack management when invoked as part of a batch.
         """
+        if not isinstance(label, str):
+            raise ValueError("Node label must be a string")
         # Generates an ID for identifying a node, unless specified
-        self._id = nodeid or self._rand_id()
-        self.label = label
+        if nodeid is not None and not isinstance(nodeid, str):
+            raise ValueError("Node id must be a string")
+        self._raw_label = label
+        proposed_id = nodeid or self._rand_id()
+        proposed_label = label
+        orig_id = proposed_id
 
-        # Node must be belong to a diagrams.
+        # Node must belong to a diagram.
         self._diagram = getdiagram()
         if self._diagram is None:
             raise EnvironmentError("Global diagrams context not set up")
 
+        # Determine effective duplicate policy: per-call > per-diagram > global.
+        effective_policy_spec: Union[str, Callable, None]
+        if duplicate_policy is not None:
+            effective_policy_spec = duplicate_policy
+        elif self._diagram.duplicate_policy is not None:
+            effective_policy_spec = self._diagram.duplicate_policy
+        else:
+            effective_policy_spec = None
+        policy_func = _resolve_policy(effective_policy_spec)
+        # Retain what policy was used on this node for potential redo operations.
+        self._duplicate_policy_spec = effective_policy_spec
+        # Existing labels/ids in this diagram.
+        existing_labels = [_normalize_key(n.label) for n in self._diagram._nodes]
+        existing_ids = [_normalize_key(n.nodeid) for n in self._diagram._nodes]
+        # Apply policy.
+        try:
+            proposed_label, proposed_id = policy_func(proposed_label, proposed_id, existing_labels, existing_ids)
+        except ValueError:
+            # Record the rejected event.
+            self._diagram._dedup_events.append(
+                {
+                    "action": "rejected",
+                    "label": label,
+                    "nodeid": proposed_id,
+                }
+            )
+            raise
+        # Adjust label and id if required.
+        self._id = proposed_id
+        self.label = proposed_label
+        # Compute autolabel after deduplication.
         if self._diagram.autolabel:
             prefix = self.__class__.__name__
             if self.label:
@@ -335,6 +615,23 @@ class Node:
             self._cluster.node(self._id, self.label, **self._attrs)
         else:
             self._diagram.node(self._id, self.label, **self._attrs)
+
+        # Append to node list and optionally to undo stack.
+        self._diagram._nodes.append(self)
+        if not batch:
+            self._diagram._undo_stack.append(("add", [self]))
+        # Log deduplication event.
+        event: Dict = {
+            "action": "added",
+            "label": self.label,
+            "nodeid": self._id,
+        }
+        # If the deduplication policy modified label or id values (excluding autolabel), mark as renamed.
+        if proposed_label != label or proposed_id != orig_id:
+            event["action"] = "renamed"
+            event["old_label"] = label
+            event["old_nodeid"] = orig_id
+        self._diagram._dedup_events.append(event)
 
     def __repr__(self):
         _name = self.__class__.__name__

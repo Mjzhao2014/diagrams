@@ -131,3 +131,13 @@ with Diagram("Grouped Workers", show=False, direction="TB"):
 ![grouped workers diagram](/img/grouped_workers_diagram.png)
 
 > You can't connect two **lists** directly because shift/arithmetic operations between lists are not allowed in Python.
+
+## Duplicate Nodes
+
+Diagrams detects duplicate node labels and ids (case-insensitive, ignoring whitespace) within a `Diagram`. The deduplication policy controls how duplicates are handled:
+
+- `error` (default): duplicate node creation raises an exception.
+- `warn`: duplicates emit a warning but both nodes are kept.
+- `copy`: duplicate labels/ids are made unique by appending a numeric suffix.
+
+You can also supply a callable policy with signature `(label, nodeid, existing_labels, existing_ids) -> (label, nodeid)`. Policies can be set globally, per-diagram, or overridden on the `Node` constructor via `duplicate_policy`. Batch creation through `Diagram.add_nodes()` is atomic and thread-safe. Use `Diagram.undo()`/`redo()` to reverse node additions, always respecting the policy in effect.
