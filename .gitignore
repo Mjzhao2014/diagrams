@@ -20,6 +20,8 @@ node_modules
 
 # testing
 main.py
+copy_case_norm.png
+dup_*.png
 
 # trash
 .DS_Store
