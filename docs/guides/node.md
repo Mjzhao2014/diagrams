@@ -141,3 +141,5 @@ Diagrams detects duplicate node labels and ids (case-insensitive, ignoring white
 - `copy`: duplicate labels/ids are made unique by appending a numeric suffix.
 
 You can also supply a callable policy with signature `(label, nodeid, existing_labels, existing_ids) -> (label, nodeid)`. Policies can be set globally, per-diagram, or overridden on the `Node` constructor via `duplicate_policy`. Batch creation through `Diagram.add_nodes()` is atomic and thread-safe. Use `Diagram.undo()`/`redo()` to reverse node additions, always respecting the policy in effect.
+
+Duplicate detection normalizes labels and ids using Unicode NFKC, strips whitespace, and compares case-insensitively. When a collision occurs, call `Diagram.dedup_report()` to inspect the recorded `added`, `renamed`, or `rejected` events along with the policy that handled them.
