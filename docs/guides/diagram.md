@@ -84,6 +84,20 @@ with Diagram("Simple Diagram", show=False):
     EC2("web")
 ```
 
+## Deduplication Policy
+
+The `Diagram` constructor accepts an optional `duplicate_policy` to control how duplicate node labels and ids are handled within that diagram. Supported values are:
+
+- `"error"` (default): raise if a duplicate is detected.
+- `"warn"`: emit a warning but keep both nodes.
+- `"copy"`: rename duplicates by appending a suffix.
+
+You can also pass a callable for custom deduplication logic, or set a global default via `diagrams.set_default_duplicate_policy()`. Per-call overrides on `Node` and `Diagram.add_nodes()` take precedence. Deduplication applies to Node creation and batch creation; see `Diagram.dedup_report()` for debugging summaries.
+
+### Batch Operations and Undo/Redo
+
+If you need to create many nodes at once, use `Diagram.add_nodes([...])` to ensure the operation is atomic—either all nodes are added, or none are added if any violates the deduplication policy. `add_nodes()` is thread-safe, unlike direct `Node()` creation. Diagram also exposes `undo()` and `redo()` to remove or restore the most recent node creation(s), with deduplication rules applied on redo.
+
 Diagrams also allow custom Graphviz dot attributes options.
 
 > `graph_attr`, `node_attr` and `edge_attr` are supported. Here is a [reference link](https://www.graphviz.org/doc/info/attrs.html).
