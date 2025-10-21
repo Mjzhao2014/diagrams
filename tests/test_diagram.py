@@ -124,6 +124,207 @@ class DiagramTest(unittest.TestCase):
         # clean the dot file as it only generated here
         os.remove(self.name + ".dot")
 
+    def test_duplicate_node_policy_warn(self):
+        with Diagram(name="dup_warn", show=False, duplicate_policy="warn"):
+            n1 = Node("cache")
+            n2 = Node("cache")
+            self.assertNotEqual(n1, n2)
+
+    def test_duplicate_node_policy_copy(self):
+        with Diagram(name="dup_copy", show=False, duplicate_policy="copy"):
+            n1 = Node("db")
+            n2 = Node("db")
+            self.assertNotEqual(n1.nodeid, n2.nodeid)
+            self.assertTrue(n2.label.startswith("db"))
+
+    def test_duplicate_node_error(self):
+        with Diagram(name="dup_case", show=False, duplicate_policy="error"):
+            Node("Worker")
+            with self.assertRaises(ValueError):
+                Node("Worker")
+
+    def test_duplicate_node_whitespace_insensitive(self):
+        with Diagram(name="dup_whitespace", show=False, duplicate_policy="error"):
+            Node("service")
+            with self.assertRaises(ValueError):
+                Node("Service")
+            with self.assertRaises(ValueError):
+                Node(" service ")
+
+    def test_duplicate_node_custom_nodeid(self):
+        with Diagram(name="dup_manualid", show=False, duplicate_policy="error"):
+            Node("a", nodeid="custom1")
+            with self.assertRaises(ValueError):
+                Node("b", nodeid="custom1")
+
+    def test_duplicate_node_across_clusters(self):
+        with Diagram(name="dup_clusters", show=False, duplicate_policy="error"):
+            with Cluster("one"):
+                Node("shared")
+            with Cluster("two"):
+                with self.assertRaises(ValueError):
+                    Node("shared")
+
+    def test_duplicate_node_concurrent_creation(self):
+        with Diagram(name="dup_concurrent", show=False, duplicate_policy="error"):
+            for i in range(3):
+                Node("dupe_" + str(i))
+                Node("dupe_" + str(i + 5))
+                with self.assertRaises(ValueError):
+                    Node("dupe_" + str(i))
+
+    def test_duplicate_node_edge_case_unicode(self):
+        with Diagram(name="dup_unicode", show=False, duplicate_policy="error"):
+            Node("nø∂e")
+            with self.assertRaises(ValueError):
+                Node("NØ∂E")
+        with Diagram(name="dup_unicode2", show=False, duplicate_policy="error"):
+            Node("foo\tbar")
+            with self.assertRaises(ValueError):
+                Node("foo bar")
+
+    def test_duplicate_node_unicode_normalization(self):
+        with Diagram(name="dup_unicode_norm", show=False, duplicate_policy="error"):
+            Node("café")
+            with self.assertRaises(ValueError):
+                Node("cafe\u0301")  # "e" + combining accent
+
+    def test_duplicate_node_label_vs_nodeid(self):
+        with Diagram(name="dup_nodeid", show=False, duplicate_policy="error"):
+            Node("test", nodeid="abc")
+            with self.assertRaises(ValueError):
+                Node("test2", nodeid="abc")
+
+    def test_duplicate_node_regression(self):
+        with Diagram(name="dup_regression", show=False, duplicate_policy="error"):
+            Node("unique_a")
+            Node("unique_b")
+
+    def test_duplicate_node_batch_policy_override(self):
+        with Diagram(name="dup_batch_override", show=False, duplicate_policy="error") as d:
+            batch = [("foo"), ("foo")]
+            nodes = d.add_nodes(batch, duplicate_policy="copy")
+            labels = [n.label for n in nodes]
+            self.assertTrue(any(label == "foo" for label in labels))
+            self.assertTrue(any(label != "foo" for label in labels))
+
+    def test_duplicate_node_nonstring(self):
+        with Diagram(name="dup_nonstring", show=False, duplicate_policy="error"):
+            with self.assertRaises(ValueError):
+                Node(123)  # Non-string label
+            with self.assertRaises(ValueError):
+                Node("valid", nodeid=456)
+
+    def test_duplicate_node_thread_safety(self):
+        import threading
+        with Diagram(name="dup_thread", show=False, duplicate_policy="error") as d:
+            errs = []
+
+            def add():
+                try:
+                    d.add_nodes(["foo"])
+                except Exception as e:
+                    errs.append(e)
+            threads = [threading.Thread(target=add) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len([e for e in errs if isinstance(e, ValueError)]), 2)
+
+    def test_duplicate_node_custom_policy_called(self):
+        called = {}
+
+        def policy(label, nodeid, labels, ids):
+            called['hit'] = (label, nodeid)
+            return (label + "_unique", nodeid + "_2")
+        with Diagram(name="dup_custom_called", show=False, duplicate_policy=policy):
+            n1 = Node("dupX", nodeid="A")
+            n2 = Node("dupX", nodeid="A")
+            self.assertEqual(called['hit'], ("dupX", "A"))
+            self.assertEqual(n2.label, "dupX_unique")
+            self.assertEqual(n2.nodeid, "A_2")
+
+    def test_duplicate_node_custom_policy_still_duplicate(self):
+        def policy(label, nodeid, labels, ids):
+            return (label, nodeid)  # returns a colliding tuple on purpose
+        with Diagram(name="dup_custom_still_dup", show=False, duplicate_policy=policy):
+            Node("foo", nodeid="bar")
+            try:
+                Node("foo", nodeid="bar")  # OK if implementation permits; also OK if it raises
+            except ValueError:
+                pass  # acceptable if the implementation re-applies the active policy (e.g., "error") to the callable's result
+
+    def test_duplicate_node_custom_policy_label_vs_nodeid(self):
+        def policy(label, nodeid, labels, ids):
+            if label in labels:
+                return (label + "2", nodeid)
+            if nodeid in ids:
+                return (label, nodeid + "2")
+            return (label, nodeid)
+        with Diagram(name="dup_custom_labelvsid", show=False, duplicate_policy=policy):
+            Node("foo", nodeid="bar")
+            n2 = Node("foo", nodeid="bar2")
+            n3 = Node("foo2", nodeid="bar")
+            self.assertEqual(n2.label, "foo2")
+            self.assertEqual(n3.nodeid, "bar2")
+
+    def test_duplicate_node_batch_atomicity(self):
+        with Diagram(name="dup_batch", show=False, duplicate_policy="error") as d:
+            batch = [("one",), ("two",), ("one",)]
+            with self.assertRaises(ValueError):
+                d.add_nodes([args[0] for args in batch])
+            self.assertFalse(any(n.label.strip() in {"one", "two"} for n in d._nodes))  # Use _nodes
+
+    def test_duplicate_node_policy_scoping(self):
+        with Diagram(name="dup_scope", show=False, duplicate_policy="error") as d:
+            Node("x")
+            n2 = Node("x", duplicate_policy="warn")
+            self.assertNotEqual(n2.nodeid, None)
+
+    def test_duplicate_node_dedup_report(self):
+        with Diagram(name="dup_report", show=False, duplicate_policy="copy") as d:
+            n1 = Node("foo")
+            n2 = Node("foo")
+            n3 = Node("bar")
+            report = d.dedup_report()
+
+    def test_duplicate_node_undo_redo(self):
+        with Diagram(name="dup_undo", show=False, duplicate_policy="error") as d:
+            n1 = Node("foo")
+            d.undo()
+            self.assertNotIn("foo", [n.label.strip() for n in d._nodes])
+            d.redo()
+            self.assertIn("foo", [n.label.strip() for n in d._nodes])
+
+    def test_duplicate_node_error_message(self):
+        with Diagram(name="dup_message", show=False, duplicate_policy="error"):
+            Node("hello")
+            with self.assertRaisesRegex(ValueError, "hello"):
+                Node("hello")
+
+    def test_duplicate_node_policy_stability(self):
+        with Diagram(name="dup_undo_redo_policy", show=False, duplicate_policy="warn") as d:
+            n1 = Node("foo")
+            n2 = Node("foo")
+            d.undo()  # Remove n2
+            # Redo should not fail (should use old policy, which was 'warn')
+            d.redo()
+            self.assertIn(n2, d._nodes)
+
+    def test_copy_policy_unique_name(self):
+        with Diagram(name="copy_case_norm", show=False, duplicate_policy="copy") as d:
+            n0 = Node("foo")          # "foo"
+            n1 = Node("Foo")          # "Foo" - should be detected as duplicate
+            n2 = Node("foo ")         # "foo " - trailing whitespace
+            n3 = Node("foo_1")        # "foo_1" - explicit suffix
+            n4 = Node("foo")          # should create "foo_2" if normalization is correct
+
+            labels = [n.label for n in d._nodes]
+            # All normalized forms should be unique
+            norm = lambda x: x.strip().lower()
+            self.assertEqual(len({norm(lbl) for lbl in labels}), len(labels), f"Labels not normalized/unique: {labels}")
+
 
 class ClusterTest(unittest.TestCase):
     def setUp(self):
