@@ -13,6 +13,13 @@ from graphviz import Digraph
 _global_duplicate_policy: Union[str, Callable] = "error"
 
 
+class _AutoNodeId:
+    """Sentinel used to detect when a node id was not supplied."""
+
+
+_AUTO_NODE_ID = _AutoNodeId()
+
+
 def set_default_duplicate_policy(policy: Union[str, Callable, None]) -> None:
     """Set the global duplicate policy used when no per-diagram or per-call policy is provided."""
     global _global_duplicate_policy
@@ -689,7 +696,7 @@ class Node:
         self,
         label: str = "",
         *,
-        nodeid: str = None,
+        nodeid: Union[str, "_AutoNodeId"] = _AUTO_NODE_ID,
         duplicate_policy: Union[str, Callable, None] = None,
         batch: bool = False,
         **attrs: Dict,
@@ -706,10 +713,13 @@ class Node:
         if not isinstance(label, str):
             raise ValueError("Node label must be a string")
         # Generates an ID for identifying a node, unless specified
-        if nodeid is not None and not isinstance(nodeid, str):
-            raise ValueError("Node id must be a string")
+        if nodeid is _AUTO_NODE_ID:
+            proposed_id = self._rand_id()
+        else:
+            if not isinstance(nodeid, str):
+                raise ValueError("Node id must be a string")
+            proposed_id = nodeid
         self._raw_label = label
-        proposed_id = nodeid or self._rand_id()
         proposed_label = label
         orig_id = proposed_id
 
