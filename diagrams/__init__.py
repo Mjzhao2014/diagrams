@@ -151,7 +151,16 @@ def _warn_policy(label: str, nodeid: str, existing_labels: List[str], existing_i
             f"Diagram '{dname}': duplicate {', '.join(conflicts)} under 'warn' policy",
             stacklevel=2,
         )
-    return label, nodeid
+    new_id = nodeid
+    if normalized_id in existing_ids:
+        base_id = nodeid or "node"
+        suffix = 1
+        candidate = f"{base_id}_warn{suffix}"
+        while _normalize_key(candidate) in existing_ids:
+            suffix += 1
+            candidate = f"{base_id}_warn{suffix}"
+        new_id = candidate
+    return label, new_id
 
 
 def _copy_policy(label: str, nodeid: str, existing_labels: List[str], existing_ids: List[str]) -> Tuple[str, str]:
