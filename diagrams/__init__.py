@@ -431,17 +431,23 @@ class Diagram:
         """Redo the most recently undone node addition."""
         if not self._redo_stack:
             return
+
         op_type, nodes = self._redo_stack.pop()
+
         if op_type == "add":
             token = _diagram_ctx.set(self)
+
             existing_labels = [
                 _normalize_key(getattr(n, "_dedup_label", n.label)) for n in self._nodes
             ]
             existing_ids = [_normalize_key(n.nodeid) for n in self._nodes]
+
             restored: List["Node"] = []
+
             try:
                 for node in nodes:
                     policy_spec = node._duplicate_policy_spec
+
                     try:
                         resolved_label, resolved_id = _resolve_with_policy(
                             self,
@@ -461,25 +467,31 @@ class Diagram:
                             }
                         )
                         raise
+
                     node._id = resolved_id
                     dedup_label = resolved_label
                     node._dedup_label = dedup_label
                     node.label = dedup_label
+
                     if self.autolabel:
                         prefix = node.__class__.__name__
                         node.label = prefix + ("\n" + dedup_label if dedup_label else "")
+
                     node._diagram = self
                     self._nodes.append(node)
+
                     event: Dict = {
                         "action": "added",
                         "label": node.label,
                         "nodeid": node.nodeid,
                         "policy": _policy_display_name(policy_spec),
                     }
+
                     if dedup_label != node._raw_label or node.nodeid != node._original_id:
                         event["action"] = "renamed"
                         event["old_label"] = node._raw_label
                         event["old_nodeid"] = node._original_id
+
                     if hasattr(node, "_dedup_event_index") and node._dedup_event_index is not None:
                         if 0 <= node._dedup_event_index < len(self._dedup_events):
                             self._dedup_events[node._dedup_event_index] = event
@@ -489,15 +501,18 @@ class Diagram:
                     else:
                         self._dedup_events.append(event)
                         node._dedup_event_index = len(self._dedup_events) - 1
+
                     restored.append(node)
                     existing_labels.append(_normalize_key(dedup_label))
                     existing_ids.append(_normalize_key(node.nodeid))
+
                 self._undo_stack.append((op_type, nodes))
                 self._rebuild()
             except Exception:
                 for node in restored:
                     if node in self._nodes:
                         self._nodes.remove(node)
+
                 self._rebuild()
                 raise
             finally:
@@ -553,10 +568,13 @@ class Diagram:
         global policy as needed."""
         if not isinstance(labels, list):
             raise ValueError("labels must be a list of strings")
+
         for lbl in labels:
             if not isinstance(lbl, str):
                 raise ValueError("Node labels must be strings")
+
         nodes: List["Node"] = []
+
         with self._lock:
             if duplicate_policy is not None:
                 effective_policy_spec: Union[str, Callable, None] = duplicate_policy
@@ -564,7 +582,9 @@ class Diagram:
                 effective_policy_spec = self.duplicate_policy
             else:
                 effective_policy_spec = get_default_duplicate_policy()
+
             token = _diagram_ctx.set(self)
+
             try:
                 for lbl in labels:
                     node = Node(
@@ -573,8 +593,10 @@ class Diagram:
                         batch=True,
                     )
                     nodes.append(node)
+
                 # Bundle the batch into undo stack as one operation.
                 self._undo_stack.append(("add", nodes))
+
                 # Any new addition invalidates the redo history.
                 self._redo_stack.clear()
                 return nodes
@@ -583,6 +605,7 @@ class Diagram:
                 for n in nodes:
                     if n in self._nodes:
                         self._nodes.remove(n)
+
                 # Remove dedup events associated with nodes that were rolled back.
                 removed = 0
                 scan_index = len(self._dedup_events) - 1
@@ -592,6 +615,7 @@ class Diagram:
                         self._dedup_events.pop(scan_index)
                         removed += 1
                     scan_index -= 1
+
                 self._rebuild()
                 raise
             finally:
