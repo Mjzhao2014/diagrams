@@ -23,6 +23,7 @@ _AUTO_NODE_ID = _AutoNodeId()
 def set_default_duplicate_policy(policy: Union[str, Callable, None]) -> None:
     """Set the global duplicate policy used when no per-diagram or per-call policy is provided."""
     global _global_duplicate_policy
+
     if policy is None:
         _global_duplicate_policy = "error"
     else:
@@ -37,6 +38,7 @@ def get_default_duplicate_policy() -> Union[str, Callable]:
 def _normalize_key(value: str) -> str:
     """Normalize label/id for dedup comparison (case, whitespace, unicode-normalized)."""
     normalized = unicodedata.normalize("NFKC", value)
+
     return "".join(normalized.split()).lower()
 
 
@@ -82,11 +84,14 @@ def _resolve_with_policy(
     is_custom_callable = callable(policy) and policy not in {_error_policy, _warn_policy, _copy_policy}
     initial_label_key = _normalize_key(label)
     initial_id_key = _normalize_key(nodeid)
+
     if initial_label_key not in existing_labels and initial_id_key not in existing_ids:
         return label, nodeid
+
     seen: Set[Tuple[str, str]] = set()
     current_label = label
     current_id = nodeid
+
     while True:
         new_label, new_id = policy_func(
             current_label,
@@ -94,26 +99,34 @@ def _resolve_with_policy(
             existing_labels.copy(),
             existing_ids.copy(),
         )
+
         if not isinstance(new_label, str) or not isinstance(new_id, str):
             raise ValueError("Duplicate policy must return (label, nodeid) strings")
+
         norm_label = _normalize_key(new_label)
         norm_id = _normalize_key(new_id)
         label_conflict = norm_label in existing_labels
         id_conflict = norm_id in existing_ids
+
         if not label_conflict and not id_conflict:
             return new_label, new_id
+
         if allows_duplicates:
             return new_label, new_id
+
         if is_custom_callable and new_label == current_label:
             return new_label, new_id
+
         if is_custom_callable and (new_label, new_id) == (current_label, current_id):
             return new_label, new_id
+
         state = (norm_label, norm_id)
         if state in seen:
             policy_name = _policy_display_name(policy)
             raise ValueError(
                 f"Diagram '{diagram.name}': duplicate label '{new_label}' or id '{new_id}' unresolved under '{policy_name}' policy"
             )
+
         seen.add(state)
         current_label, current_id = new_label, new_id
 
@@ -124,26 +137,31 @@ def _error_policy(label: str, nodeid: str, existing_labels: List[str], existing_
     normalized_label = _normalize_key(label)
     normalized_id = _normalize_key(nodeid)
     conflicts: List[str] = []
+
     if normalized_label in existing_labels:
         conflicts.append(f"label '{label}'")
     if normalized_id in existing_ids:
         conflicts.append(f"id '{nodeid}'")
+
     if conflicts:
         diagram = getdiagram()
         dname = diagram.name if diagram else "<unknown>"
         raise ValueError(f"Diagram '{dname}': duplicate {', '.join(conflicts)} under 'error' policy")
+
     return label, nodeid
 
 
 def _warn_policy(label: str, nodeid: str, existing_labels: List[str], existing_ids: List[str]) -> Tuple[str, str]:
-    """Built-in duplicate policy: emit warning but keep both."""
+    """Built-in duplicate policy: emit warning but keep the name, but assign a unique ID."""
     normalized_label = _normalize_key(label)
     normalized_id = _normalize_key(nodeid)
     conflicts: List[str] = []
+
     if normalized_label in existing_labels:
         conflicts.append(f"label '{label}'")
     if normalized_id in existing_ids:
         conflicts.append(f"id '{nodeid}'")
+
     if conflicts:
         diagram = getdiagram()
         dname = diagram.name if diagram else "<unknown>"
@@ -151,6 +169,7 @@ def _warn_policy(label: str, nodeid: str, existing_labels: List[str], existing_i
             f"Diagram '{dname}': duplicate {', '.join(conflicts)} under 'warn' policy",
             stacklevel=2,
         )
+
     new_id = nodeid
     if normalized_id in existing_ids:
         base_id = nodeid or "node"
@@ -160,6 +179,7 @@ def _warn_policy(label: str, nodeid: str, existing_labels: List[str], existing_i
             suffix += 1
             candidate = f"{base_id}_warn{suffix}"
         new_id = candidate
+
     return label, new_id
 
 
@@ -168,15 +188,19 @@ def _copy_policy(label: str, nodeid: str, existing_labels: List[str], existing_i
     new_label = label
     base_label = label
     idx = 1
+
     while _normalize_key(new_label) in existing_labels:
         new_label = f"{base_label}_{idx}"
         idx += 1
+
     new_id = nodeid
     base_id = nodeid
     id_idx = 1
+
     while _normalize_key(new_id) in existing_ids:
         new_id = f"{base_id}_{id_idx}"
         id_idx += 1
+
     return new_label, new_id
 
 
@@ -520,6 +544,7 @@ class Diagram:
 
     def _rebuild(self) -> None:
         """Rebuild the underlying graphviz structures from current nodes."""
+
         # reset the top-level graph
         saved_graph_attr = dict(self.dot.graph_attr)
         saved_node_attr = dict(self.dot.node_attr)
@@ -528,8 +553,10 @@ class Diagram:
         self.dot.graph_attr.update(saved_graph_attr)
         self.dot.node_attr.update(saved_node_attr)
         self.dot.edge_attr.update(saved_edge_attr)
+
         # gather clusters present
         clusters = {n._cluster for n in self._nodes if n._cluster}
+
         # reset clusters
         for cluster in clusters:
             c_graph_attr = dict(cluster.dot.graph_attr)
@@ -539,18 +566,21 @@ class Diagram:
             cluster.dot.graph_attr.update(c_graph_attr)
             cluster.dot.node_attr.update(c_node_attr)
             cluster.dot.edge_attr.update(c_edge_attr)
+
         # re-add nodes to graphviz structures
         for node in self._nodes:
             if node._cluster:
                 node._cluster.node(node.nodeid, node.label, **node._attrs)
             else:
                 self.node(node.nodeid, node.label, **node._attrs)
+
         # embed clusters into diagram dot respecting nesting
         for cluster in clusters:
             if cluster._parent:
                 cluster._parent.subgraph(cluster.dot)
             else:
                 self.subgraph(cluster.dot)
+
         # re-add edges whose endpoints still exist
         for src, dst, attrs in self._edges:
             if src in self._nodes and dst in self._nodes:
@@ -736,6 +766,7 @@ class Node:
         """
         if not isinstance(label, str):
             raise ValueError("Node label must be a string")
+
         # Generates an ID for identifying a node, unless specified
         if nodeid is _AUTO_NODE_ID:
             proposed_id = self._rand_id()
@@ -743,6 +774,7 @@ class Node:
             if not isinstance(nodeid, str):
                 raise ValueError("Node id must be a string")
             proposed_id = nodeid
+
         self._raw_label = label
         proposed_label = label
         orig_id = proposed_id
@@ -754,21 +786,25 @@ class Node:
 
         # Determine effective duplicate policy: per-call > per-diagram > global.
         effective_policy_spec: Union[str, Callable, None]
+
         if duplicate_policy is not None:
             effective_policy_spec = duplicate_policy
         elif self._diagram.duplicate_policy is not None:
             effective_policy_spec = self._diagram.duplicate_policy
         else:
             effective_policy_spec = get_default_duplicate_policy()
+
         # Retain what policy was used on this node for potential redo operations.
         self._duplicate_policy_spec = effective_policy_spec
         self._original_id = orig_id
         self._dedup_event_index: Optional[int] = None
+
         # Existing labels/ids in this diagram.
         existing_labels = [
             _normalize_key(getattr(n, "_dedup_label", n.label)) for n in self._diagram._nodes
         ]
         existing_ids = [_normalize_key(n.nodeid) for n in self._diagram._nodes]
+
         # Apply policy.
         try:
             proposed_label, proposed_id = _resolve_with_policy(
@@ -790,10 +826,12 @@ class Node:
                 }
             )
             raise
+
         # Adjust label and id if required.
         self._id = proposed_id
         self._dedup_label = proposed_label
         self.label = proposed_label
+
         # Compute autolabel after deduplication.
         if self._diagram.autolabel:
             prefix = self.__class__.__name__
@@ -826,9 +864,11 @@ class Node:
 
         # Append to node list and optionally to undo stack.
         self._diagram._nodes.append(self)
+
         if not batch:
             self._diagram._undo_stack.append(("add", [self]))
             self._diagram._redo_stack.clear()
+
         # Log deduplication event.
         event: Dict = {
             "action": "added",
